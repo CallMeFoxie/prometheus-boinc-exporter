@@ -8,11 +8,16 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 var connection net.Conn = nil
+
+var currentString = ""
+var keepGoing = true
 
 type auth1 struct {
 	Auth1   string   `xml:"auth1"`
@@ -178,109 +183,120 @@ func recv(objectOut interface{}) {
 	}
 }
 
-func main() {
-        if len(os.Args) == 1 {
-                fmt.Printf("Not enough arguments! Use %s <passkey>\n", os.Args[0])
-                return
-        }
-        passkey := os.Args[1]
-	connection, _ = net.Dial("tcp", "127.0.0.1:31416")
-	authMsg := &auth1{}
-	send(authMsg)
-	nonceMsg := &nonce{}
-	recv(nonceMsg)
-	fmt.Printf("Nonce: %s", nonceMsg.Nonce)
-	password := nonceMsg.Nonce + passkey
-	calculated := md5.Sum([]byte(password))
-	var calculated2 []byte = calculated[:]
-	send(&auth2{NonceHash: hex.EncodeToString(calculated2)})
-	recv(nil)
+func backgroundGatherer() {
+	for keepGoing {
+		passkey := os.Args[1]
+		connection, _ = net.Dial("tcp", "127.0.0.1:31416")
+		authMsg := &auth1{}
+		send(authMsg)
+		nonceMsg := &nonce{}
+		recv(nonceMsg)
+		fmt.Printf("Nonce: %s", nonceMsg.Nonce)
+		password := nonceMsg.Nonce + passkey
+		calculated := md5.Sum([]byte(password))
+		var calculated2 []byte = calculated[:]
+		send(&auth2{NonceHash: hex.EncodeToString(calculated2)})
+		recv(nil)
 
-	foo := GetState{}
-	clientStateReply := ClientStateReply{}
-	send(&foo)
-	recv(&clientStateReply)
+		foo := GetState{}
+		clientStateReply := ClientStateReply{}
+		send(&foo)
+		recv(&clientStateReply)
 
-	fmt.Printf("%+v\n", clientStateReply)
-	f, err := os.Create("/var/lib/prometheus/node-exporter/boinc.prom.tmp")
-	if err != nil {
-		fmt.Errorf("Error opening a file: %v", err)
+		currentString = buildString(&clientStateReply)
+
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func buildString(clientStateReply *ClientStateReply) string {
+	var sb strings.Builder
+
+	for _, project := range clientStateReply.ClientState.Projects {
+		sb.WriteString(fmt.Sprintf("boinc_client_user_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserTotalCredit)))
+	}
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_host_total_credit counter\n")
+	for _, project := range clientStateReply.ClientState.Projects {
+		sb.WriteString(fmt.Sprintf("boinc_client_host_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostTotalCredit)))
 	}
 
-	fmt.Fprintf(f, "# TYPE boinc_client_user_total_credit counter\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_jobs_success counter\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_user_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserTotalCredit))
+		sb.WriteString(fmt.Sprintf("boinc_client_jobs_success{project=\"%s\"} %d\n", project.ProjectName, project.NJobsSuccess))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprintf(f, "# TYPE boinc_client_host_total_credit counter\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_jobs_error counter\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_host_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostTotalCredit))
+		sb.WriteString(fmt.Sprintf("boinc_client_jobs_error{project=\"%s\"} %d\n", project.ProjectName, project.NJobsError))
 	}
-
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_jobs_success counter\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_host_avg_credit gauge\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_jobs_success{project=\"%s\"} %d\n", project.ProjectName, project.NJobsSuccess)
+		sb.WriteString(fmt.Sprintf("boinc_client_host_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostAvgCredit)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_jobs_error counter\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_user_avg_credit gauge\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_jobs_error{project=\"%s\"} %d\n", project.ProjectName, project.NJobsError)
+		sb.WriteString(fmt.Sprintf("boinc_client_user_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserAvgCredit)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_host_avg_credit gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_project_elapsed_time counter\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_host_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostAvgCredit))
+		sb.WriteString(fmt.Sprintf("boinc_client_project_elapsed_time{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.ElapsedTime)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_user_avg_credit gauge\n")
-	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_user_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserAvgCredit))
-	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_project_elapsed_time counter\n")
-	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_project_elapsed_time{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.ElapsedTime))
-	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_task_time_remaining gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_time_remaining gauge\n")
 	for _, result := range clientStateReply.ClientState.Results {
-		fmt.Fprintf(f, "boinc_client_task_time_remaining{state=\"%d\",wuname=\"%s\"} %f\n", result.Activetask.State, result.WUName, math.Round(result.EstimatedTimeRemaining))
+		sb.WriteString(fmt.Sprintf("boinc_client_task_time_remaining{state=\"%d\",wuname=\"%s\"} %f\n", result.Activetask.State, result.WUName, math.Round(result.EstimatedTimeRemaining)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_task_final_cpu_time gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_final_cpu_time gauge\n")
 	for _, result := range clientStateReply.ClientState.Results {
 		readyToReport := "no"
 		if result.ReadyToReport != nil {
 			readyToReport = "yes"
 		}
-		fmt.Fprintf(f, "boinc_client_task_final_cpu_time{wuname=\"%s\",ready_to_upload=\"%s\"} %f\n", result.WUName, readyToReport, math.Round(result.FinalCPUTime))
+		sb.WriteString(fmt.Sprintf("boinc_client_task_final_cpu_time{wuname=\"%s\",ready_to_upload=\"%s\"} %f\n", result.WUName, readyToReport, math.Round(result.FinalCPUTime)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprint(f, "# TYPE boinc_client_task_working_set_size gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_working_set_size gauge\n")
 	for _, result := range clientStateReply.ClientState.Results {
-		fmt.Fprintf(f, "boinc_client_task_working_set_size{wuname=\"%s\",state=\"%d\"} %f\n", result.WUName, result.Activetask.State, math.Round(result.Activetask.WorkingSetSize))
+		sb.WriteString(fmt.Sprintf("boinc_client_task_working_set_size{wuname=\"%s\",state=\"%d\"} %f\n", result.WUName, result.Activetask.State, math.Round(result.Activetask.WorkingSetSize)))
 	}
-	fmt.Fprintf(f, "\n")
-	fmt.Fprintf(f, "# TYPE boinc_client_project_active_jobs gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_project_active_jobs gauge\n")
 	for _, project := range clientStateReply.ClientState.Projects {
-		fmt.Fprintf(f, "boinc_client_project_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countTasksOfProject(&project, clientStateReply.ClientState.Results))
+		sb.WriteString(fmt.Sprintf("boinc_client_project_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countTasksOfProject(&project, clientStateReply.ClientState.Results)))
 	}
 
-	fmt.Fprintf(f, "\n")
-	fmt.Fprintf(f, "# TYPE boinc_client_task_rsc_memory_bound gauge\n")
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_rsc_memory_bound gauge\n")
 	for _, task := range clientStateReply.ClientState.Results {
 		wu := findWUbyName(task.Name, clientStateReply.ClientState.WorkUnits)
 		if wu == nil {
 			fmt.Printf("No such WU task: %s\n", task.Name)
 			continue
 		}
-		fmt.Fprintf(f, "boinc_client_task_rsc_memory_bound{wuname=\"%s\",state=\"%d\"} %f\n", task.Name, task.Activetask.State, wu.RscMemoryBound)
+		sb.WriteString(fmt.Sprintf("boinc_client_task_rsc_memory_bound{wuname=\"%s\",state=\"%d\"} %f\n", task.Name, task.Activetask.State, wu.RscMemoryBound))
 	}
 
-	f.Sync()
-	f.Close()
-	if err := os.Rename("/var/lib/prometheus/node-exporter/boinc.prom.tmp", "/var/lib/prometheus/node-exporter/boinc.prom"); err != nil {
-		fmt.Errorf("Error renaming prom file: %v", err)
+	return sb.String()
+}
+
+func main() {
+	if len(os.Args) == 1 {
+		fmt.Printf("Not enough arguments! Use %s <passkey>\n", os.Args[0])
+		return
 	}
+
+	go backgroundGatherer()
+
+	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, currentString)
+	})
+
+	http.ListenAndServe(":9109", nil)
+
 }
