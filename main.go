@@ -18,6 +18,8 @@ var connection net.Conn = nil
 
 var currentString = ""
 var keepGoing = true
+var host = "localhost"
+var tcpPort = ":9109"
 
 type auth1 struct {
 	Auth1   string   `xml:"auth1"`
@@ -186,7 +188,7 @@ func recv(objectOut interface{}) {
 func backgroundGatherer() {
 	for keepGoing {
 		passkey := os.Args[1]
-		connection, _ = net.Dial("tcp", "127.0.0.1:31416")
+		connection, _ = net.Dial("tcp", host+":31416")
 		authMsg := &auth1{}
 		send(authMsg)
 		nonceMsg := &nonce{}
@@ -291,12 +293,20 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 2 {
+		host = os.Args[2]
+	}
+
+	if len(os.Args) > 3 {
+		tcpPort = os.Args[3]
+	}
+
 	go backgroundGatherer()
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, currentString)
 	})
 
-	http.ListenAndServe(":9109", nil)
+	http.ListenAndServe(tcpPort, nil)
 
 }
