@@ -19,7 +19,7 @@ var connection net.Conn = nil
 var currentString = ""
 var keepGoing = true
 var host = "localhost"
-var tcpPort = ":9109"
+var tcpPort = "9109"
 
 type auth1 struct {
 	Auth1   string   `xml:"auth1"`
@@ -307,6 +307,6 @@ func main() {
 		fmt.Fprintf(w, currentString)
 	})
 
-	http.ListenAndServe(tcpPort, nil)
+	http.ListenAndServe(":"+tcpPort, nil)
 
 }
