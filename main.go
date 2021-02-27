@@ -55,6 +55,7 @@ type Result struct {
 	State                  int        `xml:"state"`
 	Activetask             ActiveTask `xml:"active_task"`
 	ProjectUrl             string     `xml:"project_url"`
+	Resources              string     `xml:"resources"`
 	ReadyToReport          *struct{}  `xml:"ready_to_report"` // is nil when not ready, not nil when ready
 }
 
@@ -154,6 +155,17 @@ func countTasksOfProject(project *Project, results []Result) int {
 	count := 0
 	for _, result := range results {
 		if result.ProjectUrl == project.MasterUrl && result.Activetask.State == 1 {
+			count++
+		}
+	}
+
+	return count
+}
+
+func countGPUTasksOfProject(project *Project, results []Result) int {
+	count := 0
+	for _, result := range results {
+		if result.ProjectUrl == project.MasterUrl && result.Activetask.State == 1 && strings.Contains(result.Resources, "GPU") {
 			count++
 		}
 	}
@@ -272,7 +284,11 @@ func buildString(clientStateReply *ClientStateReply) string {
 	for _, project := range clientStateReply.ClientState.Projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_project_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countTasksOfProject(&project, clientStateReply.ClientState.Results)))
 	}
-
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_project_gpu_active_jobs gauge\n")
+	for _, project := range clientStateReply.ClientState.Projects {
+		sb.WriteString(fmt.Sprintf("boinc_client_project_gpu_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countGPUTasksOfProject(&project, clientStateReply.ClientState.Results)))
+	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_task_rsc_memory_bound gauge\n")
 	for _, task := range clientStateReply.ClientState.Results {
