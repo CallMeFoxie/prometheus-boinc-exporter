@@ -66,10 +66,12 @@ type ActiveTask struct {
 	ElapsedTime       float64  `xml:"elapsed_time"`
 	WorkingSetSize    float64  `xml:"working_set_size"`
 	ProgressRate      float64  `xml:"progress_rate"`
+	FractionDone      float64  `xml:"fraction_done"`
 }
 
 type App struct {
 	XMLName          xml.Name `xml:"app"`
+	Name             string   `xml:"name"`
 	UserFriendlyName string   `xml:"user_friendly_name"`
 	NonCpuIntensive  int      `xml:"non_cpu_intensive"`
 }
@@ -79,8 +81,8 @@ type AppVersion struct {
 	AppName    string   `xml:"app_name"`
 	VersionNum int      `xml:"version_num"`
 	Platform   string   `xml:"platform"`
-	AvgNcpus   int      `xml:"avg_ncpus"`
-	Flops      float64  `xml:"flops"`
+	// AvgNcpus   int      `xml:"avg_ncpus"`
+	// Flops      float64  `xml:"flops"`
 }
 
 type WorkUnit struct {
@@ -116,11 +118,11 @@ type ClientStateReply struct {
 		// Coprocs
 		// NetState
 		// TimeStats
-		Projects []Project `xml:"project"`
-		Results  []Result  `xml:"result"`
-		Apps     []App     `xml:"app"`
-		//AppVersions []AppVersion `xml:"app_version"`
-		WorkUnits []WorkUnit `xml:"workunit"`
+		Projects    []Project    `xml:"project"`
+		Results     []Result     `xml:"result"`
+		Apps        []App        `xml:"app"`
+		AppVersions []AppVersion `xml:"app_version"`
+		WorkUnits   []WorkUnit   `xml:"workunit"`
 	} `xml:"client_state"`
 }
 
@@ -139,6 +141,33 @@ func findProjectByUrl(result *Result, projects []Project) *Project {
 	return nil
 }
 
+func findProjectName(url string, projects []Project) string {
+	for _, project := range projects {
+		if project.MasterUrl == url {
+			return project.ProjectName
+		}
+	}
+	return ""
+}
+
+func findAppName(unitname string, units []WorkUnit, appvers []AppVersion, apps []App) string {
+	wuAppName := findWUAppName(unitname, units)
+	name := ""
+	for _, appver := range appvers {
+		if wuAppName == appver.AppName {
+			name = fmt.Sprintf("%.2f", float64(appver.VersionNum)/100)
+			break
+		}
+	}
+	for _, app := range apps {
+		if app.Name == wuAppName {
+			name += " " + app.UserFriendlyName
+			break
+		}
+	}
+	return name
+}
+
 func findWUbyName(unitname string, units []WorkUnit) *WorkUnit {
 	unitname = string(unitname[0:strings.LastIndex(unitname, "_")])
 	for _, wu := range units {
@@ -149,6 +178,15 @@ func findWUbyName(unitname string, units []WorkUnit) *WorkUnit {
 	}
 
 	return nil
+}
+
+func findWUAppName(unitname string, units []WorkUnit) string {
+	for _, wu := range units {
+		if wu.Name == unitname {
+			return wu.AppName
+		}
+	}
+	return ""
 }
 
 func countTasksOfProject(project *Project, results []Result) int {
@@ -181,18 +219,26 @@ func send(object interface{}) error {
 	}
 	fmt.Printf("Sending: \n%s\n", enc)
 	enc2 := append(enc, 0x03)
-	fmt.Fprintf(connection, "%s", enc2)
+	if connection == nil {
+		fmt.Print("Send Abort\n")
+	} else {
+		fmt.Fprintf(connection, "%s", enc2)
+	}
 	return nil
 }
 
 func recv(objectOut interface{}) {
-	fmt.Printf("Waiting for recv")
-	message, _ := bufio.NewReader(connection).ReadString(0x03)
-	fmt.Printf("Received msg: \n%s\n", message)
-	if objectOut != nil {
-		err := xml.Unmarshal([]byte(message), objectOut)
-		if err != nil {
-			fmt.Errorf("Error unmarshaling: %v\n", err)
+	if connection == nil {
+		fmt.Print("Recive Abort\n")
+	} else {
+		fmt.Printf("Waiting for recv")
+		message, _ := bufio.NewReader(connection).ReadString(0x03)
+		fmt.Printf("Received msg: \n%s\n", message)
+		if objectOut != nil {
+			err := xml.Unmarshal([]byte(message), objectOut)
+			if err != nil {
+				fmt.Errorf("Error unmarshaling: %v\n", err)
+			}
 		}
 	}
 }
@@ -225,49 +271,59 @@ func backgroundGatherer() {
 
 func buildString(clientStateReply *ClientStateReply) string {
 	var sb strings.Builder
+	projects := clientStateReply.ClientState.Projects
+	workUnits := clientStateReply.ClientState.WorkUnits
+	apps := clientStateReply.ClientState.Apps
+	appVersions := clientStateReply.ClientState.AppVersions
+	results := clientStateReply.ClientState.Results
 
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_user_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserTotalCredit)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_host_total_credit counter\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_host_total_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostTotalCredit)))
 	}
 
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_jobs_success counter\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_jobs_success{project=\"%s\"} %d\n", project.ProjectName, project.NJobsSuccess))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_jobs_error counter\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_jobs_error{project=\"%s\"} %d\n", project.ProjectName, project.NJobsError))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_host_avg_credit gauge\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_host_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.HostAvgCredit)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_user_avg_credit gauge\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_user_avg_credit{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.UserAvgCredit)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_project_elapsed_time counter\n")
-	for _, project := range clientStateReply.ClientState.Projects {
+	for _, project := range projects {
 		sb.WriteString(fmt.Sprintf("boinc_client_project_elapsed_time{project=\"%s\"} %f\n", project.ProjectName, math.Round(project.ElapsedTime)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_task_time_remaining gauge\n")
-	for _, result := range clientStateReply.ClientState.Results {
-		sb.WriteString(fmt.Sprintf("boinc_client_task_time_remaining{state=\"%d\",wuname=\"%s\"} %f\n", result.Activetask.State, result.WUName, math.Round(result.EstimatedTimeRemaining)))
+	for _, result := range results {
+		sb.WriteString(fmt.Sprintf("boinc_client_task_time_remaining{project=\"%s\",state=\"%d\",wuname=\"%s\"} %f\n", findProjectName(result.ProjectUrl, projects), result.Activetask.State, result.WUName, math.Round(result.EstimatedTimeRemaining)))
+	}
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_done_percent gauge\n")
+	for _, task := range results {
+		sb.WriteString(fmt.Sprintf("boinc_client_task_done_percent{project=\"%s\",state=\"%d\",wuname=\"%s\"} %f\n", findProjectName(task.ProjectUrl, projects), task.Activetask.State, task.WUName, task.Activetask.FractionDone*100))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_task_final_cpu_time gauge\n")
-	for _, result := range clientStateReply.ClientState.Results {
+	for _, result := range results {
 		readyToReport := "no"
 		if result.ReadyToReport != nil {
 			readyToReport = "yes"
@@ -276,30 +332,34 @@ func buildString(clientStateReply *ClientStateReply) string {
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_task_working_set_size gauge\n")
-	for _, result := range clientStateReply.ClientState.Results {
+	for _, result := range results {
 		sb.WriteString(fmt.Sprintf("boinc_client_task_working_set_size{wuname=\"%s\",state=\"%d\"} %f\n", result.WUName, result.Activetask.State, math.Round(result.Activetask.WorkingSetSize)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_project_active_jobs gauge\n")
-	for _, project := range clientStateReply.ClientState.Projects {
-		sb.WriteString(fmt.Sprintf("boinc_client_project_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countTasksOfProject(&project, clientStateReply.ClientState.Results)))
+	for _, project := range projects {
+		sb.WriteString(fmt.Sprintf("boinc_client_project_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countTasksOfProject(&project, results)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_project_gpu_active_jobs gauge\n")
-	for _, project := range clientStateReply.ClientState.Projects {
-		sb.WriteString(fmt.Sprintf("boinc_client_project_gpu_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countGPUTasksOfProject(&project, clientStateReply.ClientState.Results)))
+	for _, project := range projects {
+		sb.WriteString(fmt.Sprintf("boinc_client_project_gpu_active_jobs{project=\"%s\"} %d\n", project.ProjectName, countGPUTasksOfProject(&project, results)))
 	}
 	sb.WriteString("\n")
 	sb.WriteString("# TYPE boinc_client_task_rsc_memory_bound gauge\n")
-	for _, task := range clientStateReply.ClientState.Results {
-		wu := findWUbyName(task.Name, clientStateReply.ClientState.WorkUnits)
+	for _, task := range results {
+		wu := findWUbyName(task.Name, workUnits)
 		if wu == nil {
 			fmt.Printf("No such WU task: %s\n", task.Name)
 			continue
 		}
 		sb.WriteString(fmt.Sprintf("boinc_client_task_rsc_memory_bound{wuname=\"%s\",state=\"%d\"} %f\n", task.Name, task.Activetask.State, wu.RscMemoryBound))
 	}
-
+	sb.WriteString("\n")
+	sb.WriteString("# TYPE boinc_client_task_table gauge\n")
+	for _, task := range results {
+		sb.WriteString(fmt.Sprintf("boinc_client_task_table{project=\"%s\",name=\"%s\",state=\"%d\",use=\"%s\",host=\"%s\",app=\"%s\",timeLeft=\"%f\",timeElapsed=\"%f\",progress=\"%f\"} 1\n", findProjectName(task.ProjectUrl, projects), task.Name, task.Activetask.State, task.Resources, host, findAppName(task.WUName, workUnits, appVersions, apps), math.Round(task.EstimatedTimeRemaining), math.Round(task.Activetask.ElapsedTime), task.Activetask.FractionDone*100))
+	}
 	return sb.String()
 }
 
